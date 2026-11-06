@@ -648,3 +648,17 @@ html, body {
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
+
+/* Final interaction polish */
+:focus-visible { outline: 3px solid rgba(82, 104, 232, .32); outline-offset: 3px; }
+.panel, .status-banner, .connection-pill { backdrop-filter: blur(14px); }
+.panel-heading { gap: 16px; }
+.panel-description { max-width: 48ch; line-height: 1.55; }
+.signal-card { position: relative; overflow: hidden; }
+.signal-card::after { content: ""; position: absolute; inset: auto -24px -34px auto; width: 86px; height: 86px; border-radius: 50%; background: currentColor; opacity: .035; pointer-events: none; }
+.signal-card.selected::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--blue); }
+.small-action:hover, .icon-button:hover { border-color: #c7d1ea; background: #f8f9ff; color: var(--blue); }
+.status-banner .text-button { position: relative; z-index: 1; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
