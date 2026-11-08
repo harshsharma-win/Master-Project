@@ -38,6 +38,8 @@ export default function Page() {
   const [connectionIssue, setConnectionIssue] = useState('')
   const [lastDeviceSeen, setLastDeviceSeen] = useState<Date | null>(null)
   const [selected, setSelected] = useState('B')
+  const selectedAnswerRef = useRef(selected)
+  selectedAnswerRef.current = selected
   const [lastSignal, setLastSignal] = useState('B')
   const [deviceAck, setDeviceAck] = useState<{ signal: string; status: string; eventId?: string; updatedAt: string } | null>(null)
   const [autoRepeatEnabled, setAutoRepeatEnabled] = useState(false)
@@ -45,6 +47,7 @@ export default function Page() {
   const deviceSettingsLoadedRef = useRef(false)
   const lastAckTimeRef = useRef('')
   const lastAutoRepeatResponseRef = useRef<{ eventId: string; sentAt: number } | null>(null)
+  const legacyFallbackEventRef = useRef('')
   const publishCommandRef = useRef<(payload: Record<string, unknown>, options?: { silent?: boolean; trackSending?: boolean }) => Promise<void>>(async () => {})
   const [pulses, setPulses] = useState(5)
   const [pulseDuration, setPulseDuration] = useState(250)
@@ -145,13 +148,18 @@ export default function Page() {
           autoRepeatEnabledRef.current = status.autoRepeat
           deviceSettingsLoadedRef.current = true
         }
-        if (typeof status.lastAnswer === 'string' && /^[A-D]$/.test(status.lastAnswer)) {
-          setLastSignal(status.lastAnswer)
-          setSelected(status.lastAnswer)
+        const deviceLastAnswer = typeof status.lastAnswer === 'string' && /^[A-D]$/.test(status.lastAnswer)
+          ? status.lastAnswer
+          : ''
+        if (deviceLastAnswer) {
+          setLastSignal(deviceLastAnswer)
+          setSelected(deviceLastAnswer)
+          selectedAnswerRef.current = deviceLastAnswer
         }
         const ack = status.acknowledgement
         if (ack?.signal === 'REPEAT_ANSWER_REQUEST' && ack.status === 'BUTTON_PRESSED' &&
-            typeof ack.eventId === 'string' && autoRepeatEnabledRef.current) {
+            typeof ack.eventId === 'string' && autoRepeatEnabledRef.current &&
+            legacyFallbackEventRef.current !== ack.eventId) {
           const previousResponse = lastAutoRepeatResponseRef.current
           if (!previousResponse || previousResponse.eventId !== ack.eventId || Date.now() - previousResponse.sentAt >= 1_500) {
             lastAutoRepeatResponseRef.current = { eventId: ack.eventId, sentAt: Date.now() }
@@ -160,6 +168,18 @@ export default function Page() {
         } else if (ack?.signal === 'REPEAT_ANSWER' && ack.eventId &&
                    ack.eventId === lastAutoRepeatResponseRef.current?.eventId) {
           lastAutoRepeatResponseRef.current = null
+          if (ack.status === 'UNKNOWN_COMMAND' && legacyFallbackEventRef.current !== ack.eventId) {
+            legacyFallbackEventRef.current = ack.eventId
+            const answer = signals.find((item) => item.signal === selectedAnswerRef.current) ?? signals[1]
+            const optionNumber = signals.indexOf(answer) + 1
+            addAction('ESP32 firmware does not support REPEAT_ANSWER; sending the selected answer as a vibration instead.')
+            void publishCommandRef.current({
+              signal: `OPTION_${optionNumber}`,
+              motor: 1,
+              vibrations: answer.count,
+              device: deviceId,
+            }, { trackSending: false })
+          }
         }
         if (ack?.signal && ack?.status && ack.updatedAt && ack.updatedAt !== lastAckTimeRef.current) {
           lastAckTimeRef.current = ack.updatedAt
@@ -192,6 +212,7 @@ export default function Page() {
 
   function sendSignal(signal: (typeof signals)[number], motor = 1) {
     if (sending) return
+    selectedAnswerRef.current = signal.signal
     setSelected(signal.signal); setLastSignal(signal.signal)
     window.localStorage.setItem('relay-last-signal', signal.signal)
     setTranscript((items) => [{ time: new Date().toLocaleTimeString([], { hour12: false }), text: `Signal ${signal.signal} sent — ${signal.label}.`, tag: 'Sent' }, ...items])
