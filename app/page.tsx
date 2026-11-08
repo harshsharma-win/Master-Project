@@ -165,11 +165,13 @@ export default function Page() {
             lastAutoRepeatResponseRef.current = { eventId: ack.eventId, sentAt: Date.now() }
             void publishCommandRef.current({ signal: 'REPEAT_ANSWER', eventId: ack.eventId, device: deviceId }, { silent: true, trackSending: false })
           }
-        } else if (ack?.signal === 'REPEAT_ANSWER' && ack.eventId &&
-                   ack.eventId === lastAutoRepeatResponseRef.current?.eventId) {
+        } else if (ack?.signal === 'REPEAT_ANSWER' && ack.status === 'UNKNOWN_COMMAND' &&
+                   lastAutoRepeatResponseRef.current &&
+                   (!ack.eventId || ack.eventId === lastAutoRepeatResponseRef.current.eventId)) {
+          const eventId = lastAutoRepeatResponseRef.current.eventId
           lastAutoRepeatResponseRef.current = null
-          if (ack.status === 'UNKNOWN_COMMAND' && legacyFallbackEventRef.current !== ack.eventId) {
-            legacyFallbackEventRef.current = ack.eventId
+          if (legacyFallbackEventRef.current !== eventId) {
+            legacyFallbackEventRef.current = eventId
             const answer = signals.find((item) => item.signal === selectedAnswerRef.current) ?? signals[1]
             const optionNumber = signals.indexOf(answer) + 1
             addAction('ESP32 firmware does not support REPEAT_ANSWER; sending the selected answer as a vibration instead.')
