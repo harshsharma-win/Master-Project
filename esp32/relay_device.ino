@@ -271,13 +271,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  if (strcmp(signal, "REPEAT_OPTION") == 0 || strcmp(signal, "REPEAT_ANSWER") == 0) {
+  if (strcmp(signal, "REPEAT_OPTION") == 0) {
+    startPattern(motor, requestedPulses, duration, gap, signal);
+    return;
+  }
+
+  if (strcmp(signal, "REPEAT_ANSWER") == 0) {
     repeatLastAnswer(signal);
     return;
   }
 
   if (strcmp(signal, "REPEAT_QUESTION") == 0) {
-    startPattern(motor, 2, 700, 400, signal);
+    startPattern(2, 2, 700, 400, signal);
     return;
   }
 
