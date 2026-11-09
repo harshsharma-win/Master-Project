@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Check, ChevronRight, CircleHelp, Clipboard, Cloud, Cpu, Mic, MicOff, MoreHorizontal, Radio, RefreshCw, Send, Settings2, ShieldCheck, Smartphone, Wifi, Zap } from 'lucide-react'
+import { Check, ChevronRight, CircleHelp, Clipboard, Cloud, Cpu, Mic, MicOff, MoreHorizontal, Radio, RefreshCw, Send, Settings2, ShieldCheck, Smartphone, Wifi, Zap } from 'lucide-react'
 import { supabase, supabaseConfigured } from '@/lib/supabase-client'
 
 const signals = [
@@ -18,7 +18,7 @@ function formatSpeech(text: string) {
   if (!normalized) return ''
   return normalized
     .replace(/\bi\b/g, 'I')
-    .replace(/\b(?:option\s+)?([ABCD])\s*[.):]\s*/gi, '\nOption $1:')
+    .replace(/\b(?:option\s+)?([ABCD])\s*[.):]\s*/gi, '\nOption $1: ')
 }
 
 function parseMcq(text: string) {
@@ -27,7 +27,7 @@ function parseMcq(text: string) {
   const firstOption = formatted.search(/Option [ABCD]:/i)
   const question = firstOption >= 0 ? formatted.slice(0, firstOption).replace(/\s+/g, ' ').trim() : formatted
   return {
-    question: question.replace(/^question\s*\d*[:.)-]?\s*/i, '').trim(),
+    question: question.replace(/^question(?:\s+\d+)?\s*[:.)-]\s*/i, '').trim(),
     options: optionMatches.map((match) => ({ letter: match[1].toUpperCase(), text: match[2].replace(/\n/g, ' ').trim() })),
   }
 }
@@ -47,8 +47,9 @@ export default function Page() {
   const deviceSettingsLoadedRef = useRef(false)
   const lastAckTimeRef = useRef('')
   const lastAutoRepeatResponseRef = useRef<{ eventId: string; sentAt: number } | null>(null)
+  const lastAutoRepeatSettingAckRef = useRef('')
   const legacyFallbackEventRef = useRef('')
-  const publishCommandRef = useRef<(payload: Record<string, unknown>, options?: { silent?: boolean; trackSending?: boolean }) => Promise<void>>(async () => {})
+  const publishCommandRef = useRef<(payload: Record<string, unknown>, options?: { silent?: boolean; trackSending?: boolean }) => Promise<boolean>>(async () => false)
   const [pulses, setPulses] = useState(5)
   const [pulseDuration, setPulseDuration] = useState(250)
   const [pulseGap, setPulseGap] = useState(250)
@@ -62,6 +63,7 @@ export default function Page() {
   const [interimText, setInterimText] = useState('')
   const recognitionRef = useRef<any>(null)
   const paragraphRef = useRef('')
+  const captureRef = useRef('')
   const shouldListenRef = useRef(false)
 
   useEffect(() => {
@@ -90,7 +92,11 @@ export default function Page() {
     if (savedTranscript) {
       try {
         const history = JSON.parse(savedTranscript)
-        if (Array.isArray(history)) setTranscript(history.slice(0, 20))
+        if (Array.isArray(history)) {
+          const latestSpeech = history.find((item) =>
+            item && typeof item.text === 'string' && (item.tag === 'Live' || item.tag === 'Saved'))
+          if (latestSpeech) setTranscript([latestSpeech])
+        }
       } catch {
         window.localStorage.removeItem('relay-transcript')
       }
@@ -106,7 +112,9 @@ export default function Page() {
         }
       })
       .on('broadcast', { event: 'transcript' }, ({ payload }) => {
-        if (payload?.text) setTranscript((items) => [{ time: new Date().toLocaleTimeString([], { hour12: false }), text: payload.text, tag: 'Live' as const }, ...items].slice(0, 10))
+        if (typeof payload?.text === 'string' && payload.text.trim()) {
+          setTranscript([{ time: new Date().toLocaleTimeString([], { hour12: false }), text: formatSpeech(payload.text), tag: 'Live' }])
+        }
       })
       .subscribe()
       : null
@@ -123,7 +131,7 @@ export default function Page() {
   }, [pulses, pulseDuration, pulseGap, customMotor])
 
   useEffect(() => {
-    window.localStorage.setItem('relay-transcript', JSON.stringify(transcript.slice(0, 20)))
+    window.localStorage.setItem('relay-transcript', JSON.stringify(transcript.slice(0, 1)))
   }, [transcript])
 
   useEffect(() => {
@@ -157,6 +165,20 @@ export default function Page() {
           selectedAnswerRef.current = deviceLastAnswer
         }
         const ack = status.acknowledgement
+        if (ack?.signal === 'SET_AUTO_REPEAT' && typeof ack.updatedAt === 'string' &&
+            ack.updatedAt !== lastAutoRepeatSettingAckRef.current) {
+          lastAutoRepeatSettingAckRef.current = ack.updatedAt
+          if (ack.status === 'ENABLED' || ack.status === 'DISABLED') {
+            const enabled = ack.status === 'ENABLED'
+            setAutoRepeatEnabled(enabled)
+            autoRepeatEnabledRef.current = enabled
+            deviceSettingsLoadedRef.current = true
+          } else if (ack.status === 'UNKNOWN_COMMAND') {
+            setAutoRepeatEnabled(false)
+            autoRepeatEnabledRef.current = false
+            deviceSettingsLoadedRef.current = true
+          }
+        }
         if (ack?.signal === 'REPEAT_ANSWER_REQUEST' && ack.status === 'BUTTON_PRESSED' &&
             typeof ack.eventId === 'string' && autoRepeatEnabledRef.current &&
             legacyFallbackEventRef.current !== ack.eventId) {
@@ -185,7 +207,14 @@ export default function Page() {
         }
         if (ack?.signal && ack?.status && ack.updatedAt && ack.updatedAt !== lastAckTimeRef.current) {
           lastAckTimeRef.current = ack.updatedAt
-          setDeviceAck({ signal: ack.signal, status: ack.status, eventId: ack.eventId, updatedAt: ack.updatedAt })
+          setDeviceAck({
+            signal: ack.signal === 'SET_AUTO_REPEAT' && ack.status === 'UNKNOWN_COMMAND'
+              ? 'ESP32 firmware does not support button auto-repeat. Upload the updated relay firmware.'
+              : ack.signal,
+            status: ack.status,
+            eventId: ack.eventId,
+            updatedAt: ack.updatedAt,
+          })
         }
       } catch {
         if (!cancelled) {
@@ -217,7 +246,7 @@ export default function Page() {
     selectedAnswerRef.current = signal.signal
     setSelected(signal.signal); setLastSignal(signal.signal)
     window.localStorage.setItem('relay-last-signal', signal.signal)
-    setTranscript((items) => [{ time: new Date().toLocaleTimeString([], { hour12: false }), text: `Signal ${signal.signal} sent — ${signal.label}.`, tag: 'Sent' }, ...items])
+    addAction(`${signal.label} sent to motor ${motor} with ${signal.count} vibration${signal.count === 1 ? '' : 's'}.`)
     void publishCommand({ signal: signal.signal === 'A' ? 'OPTION_1' : signal.signal === 'B' ? 'OPTION_2' : signal.signal === 'C' ? 'OPTION_3' : 'OPTION_4', motor, vibrations: signal.count, device: deviceId })
   }
 
@@ -228,8 +257,13 @@ export default function Page() {
     autoRepeatEnabledRef.current = enabled
     if (!enabled) lastAutoRepeatResponseRef.current = null
     deviceSettingsLoadedRef.current = true
-    addAction(enabled ? 'ESP32 button repeat enabled: one press starts the same A/B/C/D vibration repeating until switched off.' : 'ESP32 auto-repeat stopped; pending requests and vibration were cancelled.')
-    void publishCommand({ signal: 'SET_AUTO_REPEAT', enabled, device: deviceId })
+    addAction(enabled ? 'Enabling ESP32 button auto-repeat…' : 'Disabling ESP32 button auto-repeat…')
+    void publishCommand({ signal: 'SET_AUTO_REPEAT', enabled, device: deviceId }).then((published) => {
+      if (!published) {
+        setAutoRepeatEnabled(!enabled)
+        autoRepeatEnabledRef.current = !enabled
+      }
+    })
   }
 
   function sendMotorCommand(signal: 'QUICK_MOTOR_2' | 'REPEAT_QUESTION' | 'REPEAT_OPTION' | 'STOP' | 'CUSTOM_PATTERN', motor: number, vibrations: number, text: string, duration = 250, gap = 250) {
@@ -238,7 +272,7 @@ export default function Page() {
     void publishCommand({ signal, motor, vibrations, pulseDuration: duration, pulseGap: gap, device: deviceId })
   }
 
-  async function publishCommand(payload: Record<string, unknown>, options: { silent?: boolean; trackSending?: boolean } = {}) {
+  async function publishCommand(payload: Record<string, unknown>, options: { silent?: boolean; trackSending?: boolean } = {}): Promise<boolean> {
     const trackSending = options.trackSending !== false
     if (trackSending) setSending(true)
     const controller = new AbortController()
@@ -255,9 +289,11 @@ export default function Page() {
       })
       const result = await response.json()
       if (!response.ok) throw new Error(result.error ?? 'MQTT command failed')
-      if (!options.silent) addAction('Command sent successfully.')
+      if (!options.silent) addAction(`Command ${String(payload.signal ?? '').replaceAll('_', ' ').toLowerCase()} sent successfully.`)
+      return true
     } catch (error) {
       if (!options.silent) addAction(`Command not sent: ${error instanceof Error && error.name !== 'AbortError' ? error.message : 'Connection timed out'}`)
+      return false
     } finally {
       window.clearTimeout(timeout)
       if (trackSending) window.setTimeout(() => setSending(false), 350)
@@ -267,7 +303,8 @@ export default function Page() {
   publishCommandRef.current = publishCommand
 
   function addAction(text: string) {
-    setTranscript((items) => [{ time: new Date().toLocaleTimeString([], { hour12: false }), text, tag: 'Sent' }, ...items])
+    const status = /failed|not sent|unavailable|no transcript/i.test(text) ? 'ERROR' : 'EXECUTED'
+    setDeviceAck({ signal: text, status, updatedAt: new Date().toISOString() })
   }
 
   function toggleMicrophone() {
@@ -276,11 +313,12 @@ export default function Page() {
       recognitionRef.current?.stop()
       setListening(false)
       setInterimText('')
-      if (paragraphRef.current.trim()) {
-        const text = paragraphRef.current.trim()
-        setTranscript((items) => [{ time: new Date().toLocaleTimeString([], { hour12: false }), text, tag: 'Saved' as const }, ...items].slice(0, 10))
-        paragraphRef.current = ''
+      const text = [captureRef.current, paragraphRef.current].filter(Boolean).join(' ').trim()
+      if (text) {
+        setTranscript([{ time: new Date().toLocaleTimeString([], { hour12: false }), text: formatSpeech(text), tag: 'Saved' }])
       }
+      paragraphRef.current = ''
+      captureRef.current = ''
       return
     }
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -289,6 +327,7 @@ export default function Page() {
       return
     }
     paragraphRef.current = ''
+    captureRef.current = ''
     setInterimText('')
     shouldListenRef.current = true
     const recognition = new SpeechRecognition()
@@ -312,8 +351,9 @@ export default function Page() {
       paragraphRef.current = combined.slice(completedText.length).trim()
       if (completedSentences.length) {
         const timestamp = new Date().toLocaleTimeString([], { hour12: false })
-        setTranscript((items) => [...completedSentences.map((sentence) => ({ time: timestamp, text: formatSpeech(sentence), tag: 'Live' as const })), ...items].slice(0, 20))
-        if (supabaseConfigured) void supabase.channel('esp32-relay-control').send({ type: 'broadcast', event: 'transcript', payload: { text: completedText } })
+        captureRef.current = [captureRef.current, completedText].filter(Boolean).join(' ').replace(/\s+/g, ' ')
+        setTranscript([{ time: timestamp, text: formatSpeech(captureRef.current), tag: 'Live' }])
+        if (supabaseConfigured) void supabase.channel('esp32-relay-control').send({ type: 'broadcast', event: 'transcript', payload: { text: captureRef.current } })
       }
     }
 
@@ -348,42 +388,33 @@ export default function Page() {
     setListening(true)
   }
 
-  function copyTranscript() {
-    const text = [paragraphRef.current, ...transcript.map((item) => item.text)].filter(Boolean).join('\n')
-    void navigator.clipboard.writeText(text).then(() => {
+  async function copyTranscript() {
+    const liveText = [captureRef.current, paragraphRef.current, interimText].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+    const text = formatSpeech(listening ? liveText : transcript[0]?.text ?? '')
+    if (!text) {
+      addAction('There is no transcript to copy yet.')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(text)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1_200)
-    })
+    } catch (error) {
+      addAction(`Transcript copy failed: ${error instanceof Error ? error.message : 'Clipboard access is unavailable.'}`)
+    }
   }
 
   return <main className="app-shell">
-    <style>{`
-      @media (max-width: 820px) {
-        .dashboard-grid.control-layout > .mic-panel {
-          grid-column: 1 !important;
-          grid-row: 1 !important;
-        }
-        .dashboard-grid.control-layout > .signal-panel {
-          grid-column: 1 !important;
-          grid-row: 2 !important;
-        }
-        .dashboard-grid.control-layout > .lower-grid {
-          grid-column: 1 !important;
-          grid-row: 3 !important;
-        }
-      }
-    `}</style>
     <aside className="sidebar">
       <div className="brand-mark"><Radio size={19} /></div><div className="brand-copy"><strong>Relay</strong><span>Voice control</span></div>
       <div className="nav-group"><button className={`nav-item ${page === 'dashboard' ? 'active' : ''}`} onClick={() => setPage('dashboard')}><Radio size={17} /> Dashboard</button><button className={`nav-item ${page === 'connect' ? 'active' : ''}`} onClick={() => setPage('connect')}><Wifi size={17} /> Connections</button></div>
       <div className="sidebar-spacer" /><div className={`device-mini ${connected ? '' : 'is-offline'}`}><div className="device-icon"><Cpu size={17} /></div><div><strong>ESP32 relay</strong><span><i className="status-dot" /> {connected ? 'Online' : 'Waiting for device'}</span></div><MoreHorizontal size={16} /></div><button className="settings-link" onClick={() => setPage('connect')}><Settings2 size={17} /> Settings</button><div className="profile"><div className="avatar">HS</div><div><strong>Harsh Sharma</strong><span>Personal workspace</span></div><ChevronRight size={15} /></div>
     </aside>
     <section className="content">
-      <header className="topbar"><div><p className="eyebrow">{new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date()).toUpperCase()}</p><h1>{page === 'dashboard' ? 'Good morning, Harsh' : 'Connection center'}</h1></div><div className="top-actions"><div className={`connection-pill ${connected ? '' : 'offline'}`} role="status" aria-live="polite"><i className="status-dot" /> {connected ? 'ESP32 connected' : 'Waiting for ESP32'}</div><button className="icon-button" aria-label="Open settings" onClick={() => setPage('connect')}><Settings2 size={18} /></button></div></header>
+      <header className="topbar"><div><p className="eyebrow">{new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date()).toUpperCase()}</p><h1>{page === 'dashboard' ? <>Good morning, Harsh <span aria-hidden="true">{String.fromCodePoint(0x1f44b)}</span></> : 'Connection center'}</h1>{page === 'dashboard' && <p className="page-subtitle">Your ESP32 relay is ready to assist</p>}</div><div className="top-actions"><div className={`connection-pill ${connected ? '' : 'offline'}`} role="status" aria-live="polite"><i className="status-dot" /> {connected ? 'ESP32 connected' : 'Waiting for ESP32'}</div><button className="icon-button" aria-label="Open settings" onClick={() => setPage('connect')}><Settings2 size={18} /></button></div></header>
       {page === 'connect' ? <ConnectionPage connected={connected} connectionIssue={connectionIssue} setConnected={setConnected} deviceId={deviceId} setDeviceId={setDeviceId} endpoint={endpoint} setEndpoint={setEndpoint} onDashboard={() => setPage('dashboard')} /> : <>
-        <section className={`status-banner ${connected ? '' : 'offline-banner'}`}><div className="status-icon"><ShieldCheck size={20} /></div><div><strong>{connected ? 'ESP32 control is ready' : 'ESP32 is not reporting online'}</strong><span>{connected ? 'Send vibration patterns over the internet. No shared Wi-Fi or LAN required.' : (connectionIssue || 'Check device power and internet access, then wait for its heartbeat.')}</span></div><button className="text-button" onClick={() => setPage('connect')}>Review connection <ChevronRight size={15} /></button></section>
-        <div className="dashboard-grid control-layout"><section className="panel mic-panel"><div className="panel-heading"><div><p className="section-label">VOICE INPUT</p><h2>Phone microphone</h2></div><span className="live-badge"><span className="pulse-dot" /> {listening ? 'Listening' : 'Ready'}</span></div><div className="mic-stage"><div className={`mic-orb ${listening ? 'is-listening' : ''}`}><Mic size={34} /></div><div className="waveform">{[22,42,31,58,38,74,45,28,65,44,30,52,35,67,43].map((height, index) => <span key={index} style={{ height: `${listening ? height : 9}px` }} />)}</div><strong>{listening ? 'Listening for speech…' : 'Microphone is ready'}</strong><span className="muted">{listening ? 'Speech stays visible until you stop' : 'Tap start to capture your voice'}</span></div><button className="listen-button" onClick={toggleMicrophone}>{listening ? <><MicOff size={17} /> Stop listening</> : <><Mic size={17} /> Start listening</>}</button></section><section className="panel signal-panel"><div className="panel-heading"><div><p className="section-label">REMOTE OUTPUT</p><h2>Vibration options</h2></div><span className={`relay-status ${connected ? '' : 'offline-status'}`}><i className="status-dot" /> {connected ? 'ESP32 online' : 'ESP32 offline'}</span></div><p className="panel-description">A/B/C/D send a clear vibration response through the internet.</p><div className="signal-grid">{signals.map((signal) => <button key={signal.signal} className={`signal-card ${signal.tone} ${selected === signal.signal ? 'selected' : ''}`} onClick={() => sendSignal(signal)}><div className="signal-letter">{signal.signal}</div><div className="signal-copy"><strong>{signal.label}</strong><span>{signal.detail}</span></div><Send size={16} /></button>)}</div><div className="last-signal"><span>Last command</span><strong>Signal {lastSignal}</strong><span className="last-time">just now</span></div></section></div>
-        <div className="lower-grid"><section className="panel transcript-panel transcript-workspace"><div className="panel-heading"><div><p className="section-label">LIVE MCQ TRANSCRIPT</p><h2>Question workspace</h2></div><div className="transcript-actions"><button className="small-action" onClick={copyTranscript}><Clipboard size={14} /> {copied ? 'Copied' : 'Copy'}</button><button className="small-action" onClick={() => setTranscript([])}><RefreshCw size={14} /> Clear</button></div></div><div className="transcript-live-bar"><i className={listening ? 'pulse-dot' : 'status-dot'} />{listening ? 'Listening live' : 'Transcript ready'}<span>{transcript.length} saved segment{transcript.length === 1 ? '' : 's'}</span></div><div className="transcript-content">{(listening || interimText || paragraphRef.current) && <div className="live-transcript"><div className="live-caption"><span>Now speaking</span><strong>{interimText ? 'Live words' : 'Ready'}</strong></div><p>{paragraphRef.current}{paragraphRef.current && interimText ? ' ' : ''}<span>{interimText}</span></p></div>}{transcript.length ? transcript.map((item, index) => { const mcq = parseMcq(item.text); return <article className="question-card" key={`${item.time}-${index}`}><div className="question-card-meta"><span>{index === transcript.length - 1 ? 'Latest question' : `Segment ${transcript.length - index}`}</span><time>{item.time}</time></div><h3>{mcq.question || item.text}</h3>{mcq.options.length > 0 && <div className="option-list">{mcq.options.map((option) => <div className="transcript-option" key={option.letter}><span>{option.letter}</span><p>{option.text || 'Listening…'}</p></div>)}</div>}</article> }) : !listening && !interimText && <div className="transcript-empty"><Mic size={24} /><strong>Start speaking your question</strong><span>Say “Question”, followed by options A through D. The transcript will stay visible.</span></div>}</div></section><section className="panel urgent-panel"><div className="panel-heading"><div><p className="section-label">URGENT CONTROLS</p><h2>Separate actions</h2></div><AlertTriangle size={18} className="orange-icon" /></div><button className="secondary-action" onClick={() => sendMotorCommand('REPEAT_QUESTION', 2, 2, 'Repeat question sent to motor 2 - 2 vibrations')}><CircleHelp size={17} /><span><strong>Repeat question - motor 2</strong><small>Send 2 vibrations on motor 2</small></span><ChevronRight size={17} /></button><div className="auto-repeat-control"><div><strong>ESP32 button auto-repeat</strong><small>Press the ESP32 button once to repeat the same last A/B/C/D vibration continuously. Turn this switch off to stop it; repeats have no count limit.</small></div><button type="button" role="switch" aria-checked={autoRepeatEnabled} aria-label="Enable continuous repeat of the last vibration after the ESP32 button is pressed" className={`auto-repeat-switch ${autoRepeatEnabled ? 'is-on' : ''}`} disabled={!connected || sending} onClick={toggleAutoRepeat}><span /></button></div><button className="secondary-action" onClick={() => sendMotorCommand('REPEAT_OPTION', 2, 1, 'Repeat option sent to motor 2 - 1 vibration')}><RefreshCw size={17} /><span><strong>Repeat option - motor 2</strong><small>Send 1 vibration on motor 2</small></span><ChevronRight size={17} /></button><div className="device-response" role="status" aria-live="polite"><span>DEVICE RESPONSE</span><strong>{deviceAck ? `${deviceAck.signal === 'REPEAT_OPTION' ? 'Repeat option' : deviceAck.signal === 'REPEAT_QUESTION' ? 'Repeat question' : deviceAck.signal.replaceAll('_', ' ')} · ${deviceAck.status === 'EXECUTED' ? 'Completed' : deviceAck.status === 'RECEIVED' ? 'Received by device' : deviceAck.status}` : 'Waiting for device confirmation'}</strong><small>{deviceAck ? `Updated ${new Date(deviceAck.updatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Device acknowledgments will appear here'}</small></div><div className="custom-pattern-editor"><div className="custom-pattern-title"><span>Custom vibration pattern</span><div className="motor-toggle"><button className={customMotor === 1 ? 'active' : ''} onClick={() => setCustomMotor(1)}>Motor 1</button><button className={customMotor === 2 ? 'active' : ''} onClick={() => setCustomMotor(2)}>Motor 2</button></div></div><div className="pattern-controls"><label><span>Vibrations</span><div><button onClick={() => setPulses(Math.max(1, pulses - 1))}>−</button><strong>{pulses}</strong><button onClick={() => setPulses(Math.min(20, pulses + 1))}>+</button></div></label><label><span>Pulse on (ms)</span><input type="number" min="50" max="5000" step="50" value={pulseDuration} onChange={(event) => setPulseDuration(Math.min(5000, Math.max(50, Number(event.target.value) || 50)))} /></label><label><span>Gap off (ms)</span><input type="number" min="50" max="5000" step="50" value={pulseGap} onChange={(event) => setPulseGap(Math.min(5000, Math.max(50, Number(event.target.value) || 50)))} /></label></div><button className="listen-button pattern-send" onClick={() => sendMotorCommand('CUSTOM_PATTERN', customMotor, pulses, `Custom pattern sent — motor ${customMotor}, ${pulses} pulses, ${pulseDuration} ms on, ${pulseGap} ms gap`, pulseDuration, pulseGap)}><Zap size={16} /> Send custom pattern</button></div></section></div>
+        <section className={`reporting-banner ${connected ? 'is-online' : 'is-offline'}`} role="status" aria-live="polite"><span className="reporting-indicator" /><div className="reporting-copy"><strong>{connected ? 'ESP32 is online and reporting data' : 'ESP32 is offline'}</strong><span>{connected ? lastDeviceSeen ? `Last seen ${lastDeviceSeen.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Device heartbeat received' : connectionIssue || 'Check device power and internet access, then wait for its heartbeat.'}</span></div><button className="text-button" onClick={() => setPage('connect')}>Connection details <ChevronRight size={15} /></button></section>
+        <div className="dashboard-grid control-layout"><section className="panel signal-panel"><div className="panel-heading"><div><p className="section-label">REMOTE OUTPUT</p><h2>Vibration options</h2></div><span className={`relay-status ${connected ? '' : 'offline-status'}`}><i className="status-dot" /> {connected ? 'ESP32 online' : 'ESP32 offline'}</span></div><p className="panel-description">A/B/C/D send a clear vibration response through the internet.</p><div className="signal-grid">{signals.map((signal) => <button key={signal.signal} className={`signal-card ${signal.tone} ${selected === signal.signal ? 'selected' : ''}`} onClick={() => sendSignal(signal)}><div className="signal-letter">{signal.signal}</div><div className="signal-copy"><strong>{signal.label}</strong><span>{signal.detail}</span></div><Send size={16} /></button>)}</div><div className="last-signal"><span>Last command</span><strong>Signal {lastSignal}</strong><span className="last-time">just now</span></div></section><section className="panel transcript-panel transcript-workspace dashboard-transcript-panel"><div className="panel-heading"><div><p className="section-label">LIVE TRANSCRIPT</p><h2>Live MCQ Transcript</h2></div><div className="transcript-actions"><button type="button" className={`transcript-mic-button ${listening ? 'is-listening' : ''}`} onClick={toggleMicrophone} aria-label={listening ? 'Stop voice transcription' : 'Start voice transcription'} aria-pressed={listening}>{listening ? <MicOff size={17} /> : <Mic size={17} />}</button><button className="small-action" onClick={copyTranscript}><Clipboard size={14} /> {copied ? 'Copied' : 'Copy'}</button><button className="small-action" onClick={() => setTranscript([])}><RefreshCw size={14} /> Clear</button></div></div><div className="transcript-live-bar"><i className={listening ? 'pulse-dot' : 'status-dot'} />{listening ? 'Listening live' : 'Transcript ready'}<span>{transcript.length} saved segment{transcript.length === 1 ? '' : 's'}</span></div><div className="transcript-content">{(listening || interimText || paragraphRef.current) && <div className="live-transcript"><div className="live-caption"><span>Now speaking</span><strong>{interimText ? 'Live words' : 'Ready'}</strong></div><p>{paragraphRef.current}{paragraphRef.current && interimText ? ' ' : ''}<span>{interimText}</span></p></div>}{transcript.length ? transcript.map((item, index) => { const mcq = parseMcq(item.text); return <article className="question-card" key={`${item.time}-${index}`}><div className="question-card-meta"><span>{index === transcript.length - 1 ? 'Latest question' : `Segment ${transcript.length - index}`}</span><time>{item.time}</time></div><h3>{mcq.question || item.text}</h3>{mcq.options.length > 0 && <div className="option-list">{mcq.options.map((option) => <div className="transcript-option" key={option.letter}><span>{option.letter}</span><p>{option.text || 'Listening…'}</p></div>)}</div>}</article> }) : !listening && !interimText && <div className="transcript-empty"><Mic size={24} /><strong>Tap the round audio button and speak</strong><span>Your spoken words will appear here as you talk.</span></div>}</div></section></div><div className="lower-grid"><section className="panel urgent-panel quick-controls-panel"><div className="panel-heading"><div><p className="section-label">QUICK CONTROLS</p><h2>Quick controls</h2></div><Settings2 size={18} className="quick-controls-icon" /></div><div className="quick-control-grid"><button className="secondary-action" onClick={() => sendMotorCommand('REPEAT_QUESTION', 2, 2, 'Repeat question sent to motor 2 - 2 vibrations')}><CircleHelp size={17} /><span><strong>Repeat question - motor 2</strong><small>Send 2 vibrations on motor 2</small></span><ChevronRight size={17} /></button><div className="auto-repeat-control"><div><strong>ESP32 button auto-repeat</strong><small>Press the device button to repeat the last answer. Switch off to stop.</small></div><button type="button" role="switch" aria-checked={autoRepeatEnabled} aria-label="Enable continuous repeat of the last vibration after the ESP32 button is pressed" className={`auto-repeat-switch ${autoRepeatEnabled ? 'is-on' : ''}`} disabled={!connected || sending} onClick={toggleAutoRepeat}><span /></button></div><button className="secondary-action" onClick={() => sendMotorCommand('REPEAT_OPTION', 2, 1, 'Repeat option sent to motor 2 - 1 vibration')}><RefreshCw size={17} /><span><strong>Repeat option - motor 2</strong><small>Send 1 vibration on motor 2</small></span><ChevronRight size={17} /></button><div className="device-response" role="status" aria-live="polite"><span>DEVICE RESPONSE</span><strong>{deviceAck ? `${deviceAck.signal === 'REPEAT_OPTION' ? 'Repeat option' : deviceAck.signal === 'REPEAT_QUESTION' ? 'Repeat question' : deviceAck.signal.replaceAll('_', ' ')} · ${deviceAck.status === 'EXECUTED' ? 'Completed' : deviceAck.status === 'RECEIVED' ? 'Received by device' : deviceAck.status}` : 'Waiting for device confirmation'}</strong><small>{deviceAck ? `Updated ${new Date(deviceAck.updatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : 'Device acknowledgments will appear here'}</small></div></div></section><section className="panel custom-pattern-editor"><div className="custom-pattern-title"><span>Custom vibration pattern</span><div className="motor-toggle"><button className={customMotor === 1 ? 'active' : ''} onClick={() => setCustomMotor(1)}>Motor 1</button><button className={customMotor === 2 ? 'active' : ''} onClick={() => setCustomMotor(2)}>Motor 2</button></div></div><div className="pattern-controls"><label><span>Vibrations</span><div><button onClick={() => setPulses(Math.max(1, pulses - 1))}>−</button><strong>{pulses}</strong><button onClick={() => setPulses(Math.min(20, pulses + 1))}>+</button></div></label><label><span>Pulse on (ms)</span><input type="number" min="50" max="5000" step="50" value={pulseDuration} onChange={(event) => setPulseDuration(Math.min(5000, Math.max(50, Number(event.target.value) || 50)))} /></label><label><span>Gap off (ms)</span><input type="number" min="50" max="5000" step="50" value={pulseGap} onChange={(event) => setPulseGap(Math.min(5000, Math.max(50, Number(event.target.value) || 50)))} /></label></div><button className="listen-button pattern-send" onClick={() => sendMotorCommand('CUSTOM_PATTERN', customMotor, pulses, `Custom pattern sent — motor ${customMotor}, ${pulses} pulses, ${pulseDuration} ms on, ${pulseGap} ms gap`, pulseDuration, pulseGap)}><Zap size={16} /> Send custom pattern</button></section></div>
       </>}
       <footer className="footer-note"><span>Internet encrypted · No LAN required</span><span>Relay v1.0.4</span></footer>
     </section>
