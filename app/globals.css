@@ -261,6 +261,19 @@ body {
   min-height: 58px;
 }
 .urgent-action { border-color: #f4d9c9; background: linear-gradient(90deg, #fffaf7, #fff); }
+.device-response {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 12px 0 0;
+  padding: 13px 15px;
+  border: 1px solid #dce6f3;
+  border-radius: 12px;
+  background: #f6f9fd;
+}
+.device-response > span { color: #7890aa; font-size: 9px; font-weight: 700; letter-spacing: .12em; }
+.device-response > strong { color: #283c58; font-size: 12px; text-transform: capitalize; }
+.device-response > small { color: #8291a5; font-size: 11px; }
 .custom-pattern-editor {
   margin-top: 18px;
   padding: 16px;
