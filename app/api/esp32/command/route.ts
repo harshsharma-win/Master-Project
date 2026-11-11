@@ -9,10 +9,11 @@ type CommandBody = {
   pulseDuration?: number
   pulseGap?: number
   device?: string
+  enabled?: boolean
 }
 
 function isValidSignal(signal: string) {
-  return ['OPTION_1', 'OPTION_2', 'OPTION_3', 'OPTION_4', 'QUICK_MOTOR_2', 'REPEAT_QUESTION', 'REPEAT_OPTION', 'CUSTOM_PATTERN', 'STOP'].includes(signal)
+  return ['OPTION_1', 'OPTION_2', 'OPTION_3', 'OPTION_4', 'QUICK_MOTOR_2', 'REPEAT_QUESTION', 'REPEAT_OPTION', 'CUSTOM_PATTERN', 'SET_AUTO_REPEAT', 'STOP'].includes(signal)
 }
 
 export async function POST(request: Request) {
@@ -50,7 +51,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: 'Numeric command values must be integers.' }, { status: 400 })
   }
 
-  if (!isValidSignal(signal) || !Number.isInteger(motor) || ![1, 2].includes(motor) ||
+  if (!isValidSignal(signal) || (signal === 'SET_AUTO_REPEAT' && typeof body.enabled !== 'boolean') ||
+      !Number.isInteger(motor) || ![1, 2].includes(motor) ||
       !Number.isInteger(vibrations) || vibrations < 1 || vibrations > 20 ||
       !Number.isInteger(pulseDuration) || pulseDuration < 50 || pulseDuration > 5_000 ||
       !Number.isInteger(pulseGap) || pulseGap < 50 || pulseGap > 5_000) {
@@ -69,7 +71,7 @@ export async function POST(request: Request) {
       })
     }
 
-    const payload = JSON.stringify({ signal, motor, vibrations, pulseDuration, pulseGap, device: body.device ?? 'ESP32-RELAY-01', timestamp: new Date().toISOString() })
+    const payload = JSON.stringify({ signal, motor, vibrations, pulseDuration, pulseGap, ...(signal === 'SET_AUTO_REPEAT' ? { enabled: body.enabled } : {}), device: body.device ?? 'ESP32-RELAY-01', timestamp: new Date().toISOString() })
     const commandTopic = getCommandTopic()
     await new Promise<void>((resolve, reject) => client.publish(commandTopic, payload, { qos: 1 }, (error) => error ? reject(error) : resolve()))
 

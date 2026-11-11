@@ -25,6 +25,8 @@ export const latestStatus: {
   state: string
   device?: string
   rssi?: number
+  autoRepeat?: boolean
+  lastAnswer?: string
   updatedAt: string
 } = {
   online: false,
@@ -53,7 +55,7 @@ if (!state.__relayMqtt) state.__relayMqtt = {}
 export function getBrokerClient() {
   if (!state.__relayMqtt) return null
   const config = state.__relayMqtt.config ?? defaultConfig
-  if (state.__relayMqtt.client?.connected) return state.__relayMqtt.client
+  if (state.__relayMqtt.client && !state.__relayMqtt.client.disconnecting) return state.__relayMqtt.client
 
   const mqttUrl = config.server.startsWith('mqtt') ? config.server : `mqtts://${config.server}:${config.port}`
   const client = mqtt.connect(mqttUrl, {
@@ -77,6 +79,8 @@ export function getBrokerClient() {
         latestStatus.state = data.state ?? 'offline'
         latestStatus.device = data.device
         latestStatus.rssi = typeof data.rssi === 'number' ? data.rssi : undefined
+        latestStatus.autoRepeat = typeof data.autoRepeat === 'boolean' ? data.autoRepeat : undefined
+        latestStatus.lastAnswer = typeof data.lastAnswer === 'string' ? data.lastAnswer : undefined
         latestStatus.updatedAt = new Date().toISOString()
       } catch {
         // Ignore malformed broker payloads.
@@ -104,6 +108,55 @@ export function getBrokerClient() {
   return client
 }
 
+export async function refreshBrokerStatus(timeoutMs = 3_500) {
+  const client = getBrokerClient()
+  if (!client) return latestStatus
+
+  const statusAge = Date.now() - new Date(latestStatus.updatedAt).getTime()
+  if (Number.isFinite(statusAge) && statusAge < 10_000 && latestStatus.state !== 'connecting') return latestStatus
+
+  const deadline = Date.now() + timeoutMs
+  if (!client.connected) {
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timeout)
+        client.off('connect', finish)
+        client.off('error', finish)
+        resolve()
+      }
+      const timeout = setTimeout(finish, Math.max(0, deadline - Date.now()))
+      client.once('connect', finish)
+      client.once('error', finish)
+      if (client.connected) finish()
+    })
+  }
+
+  if (!client.connected) return latestStatus
+
+  const config = state.__relayMqtt?.config ?? defaultConfig
+  await new Promise<void>((resolve) => {
+    let settled = false
+    let timeout: ReturnType<typeof setTimeout>
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      client.off('message', onMessage)
+      resolve()
+    }
+    const onMessage = (topic: string) => {
+      if (topic === config.statusTopic) finish()
+    }
+    client.on('message', onMessage)
+    timeout = setTimeout(finish, Math.max(0, deadline - Date.now()))
+    client.subscribe(config.statusTopic, { qos: 1 }, (error) => {
+      if (error) finish()
+    })
+  })
+
+  return latestStatus
+}
+
 export function getBrokerConfig() {
   const config = state.__relayMqtt?.config ?? defaultConfig
   return { ...config, password: '' }
@@ -118,7 +171,12 @@ export function configureBroker(config: BrokerConfig) {
   const oldClient = state.__relayMqtt?.client
   if (oldClient) oldClient.end(true)
   state.__relayMqtt.client = undefined
-  state.__relayMqtt.config = { ...config }
+  state.__relayMqtt.config = {
+    ...defaultConfig,
+    ...config,
+    username: config.username || defaultConfig.username,
+    password: config.password || defaultConfig.password,
+  }
   latestStatus.online = false
   latestStatus.state = 'connecting'
   latestStatus.updatedAt = new Date().toISOString()

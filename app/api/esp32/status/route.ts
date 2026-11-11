@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
-import { getBrokerClient, latestAck, latestStatus } from '@/lib/esp32-mqtt'
+import { getBrokerClient, latestAck, latestStatus, refreshBrokerStatus } from '@/lib/esp32-mqtt'
 
 export const runtime = 'nodejs'
 
 export async function GET() {
   const client = getBrokerClient()
+  await refreshBrokerStatus()
   const statusAge = latestStatus.updatedAt === new Date(0).toISOString()
     ? Number.POSITIVE_INFINITY
     : Date.now() - new Date(latestStatus.updatedAt).getTime()

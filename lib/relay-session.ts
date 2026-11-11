@@ -5,7 +5,10 @@ const COOKIE_NAME = 'relay_session'
 const runtimeState = globalThis as typeof globalThis & { __relaySessionSecret?: Buffer }
 
 function secret() {
-  if (process.env.RELAY_ADMIN_SECRET) return process.env.RELAY_ADMIN_SECRET
+  if (process.env.RELAY_ADMIN_SECRET && process.env.RELAY_ADMIN_SECRET.length >= 32) return process.env.RELAY_ADMIN_SECRET
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('RELAY_ADMIN_SECRET must be configured for production sessions.')
+  }
   if (!runtimeState.__relaySessionSecret) runtimeState.__relaySessionSecret = randomBytes(32)
   return runtimeState.__relaySessionSecret.toString('hex')
 }
