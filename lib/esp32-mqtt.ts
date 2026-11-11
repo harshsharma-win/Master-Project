@@ -27,6 +27,7 @@ export const latestStatus: {
   rssi?: number
   autoRepeat?: boolean
   lastAnswer?: string
+  brokerError?: string
   updatedAt: string
 } = {
   online: false,
@@ -46,16 +47,44 @@ export const latestAck: {
 
 type SharedMqttState = {
   client?: mqtt.MqttClient
+  clientConfigKey?: string
   config?: BrokerConfig
 }
 
 const state = globalThis as typeof globalThis & { __relayMqtt?: SharedMqttState }
 if (!state.__relayMqtt) state.__relayMqtt = {}
 
+function currentConfig(): BrokerConfig {
+  const override = state.__relayMqtt?.config
+  return {
+    ...defaultConfig,
+    ...override,
+    server: override?.server || defaultConfig.server,
+    port: override?.port ?? defaultConfig.port,
+    username: defaultConfig.username || override?.username || '',
+    password: defaultConfig.password || override?.password || '',
+    commandTopic: override?.commandTopic || defaultConfig.commandTopic,
+    statusTopic: override?.statusTopic || defaultConfig.statusTopic,
+    ackTopic: override?.ackTopic || defaultConfig.ackTopic,
+  }
+}
+
+function summarizeBrokerError(error: Error) {
+  const message = error.message.toLowerCase()
+  if (message.includes('not authorized') || message.includes('bad user') || message.includes('bad password')) return 'The MQTT broker rejected its credentials.'
+  if (message.includes('certificate') || message.includes('tls')) return 'MQTT TLS certificate validation failed.'
+  if (message.includes('enotfound') || message.includes('eai_again') || message.includes('getaddrinfo')) return 'The MQTT broker hostname could not be resolved.'
+  if (message.includes('econnrefused') || message.includes('connection refused')) return 'The MQTT broker refused the connection.'
+  if (message.includes('timeout') || message.includes('timed out')) return 'The MQTT broker connection timed out.'
+  return 'The MQTT broker connection failed.'
+}
+
 export function getBrokerClient() {
   if (!state.__relayMqtt) return null
-  const config = state.__relayMqtt.config ?? defaultConfig
-  if (state.__relayMqtt.client && !state.__relayMqtt.client.disconnecting) return state.__relayMqtt.client
+  const config = currentConfig()
+  const configKey = JSON.stringify(config)
+  if (state.__relayMqtt.client && state.__relayMqtt.clientConfigKey === configKey && !state.__relayMqtt.client.disconnecting) return state.__relayMqtt.client
+  if (state.__relayMqtt.client) state.__relayMqtt.client.end(true)
 
   const mqttUrl = config.server.startsWith('mqtt') ? config.server : `mqtts://${config.server}:${config.port}`
   const client = mqtt.connect(mqttUrl, {
@@ -68,6 +97,7 @@ export function getBrokerClient() {
   })
 
   client.on('connect', () => {
+    latestStatus.brokerError = undefined
     client.subscribe([config.statusTopic, config.ackTopic], { qos: 1 })
   })
 
@@ -99,11 +129,13 @@ export function getBrokerClient() {
     }
   })
 
-  client.on('error', () => {
+  client.on('error', (error) => {
+    latestStatus.brokerError = summarizeBrokerError(error)
     latestStatus.online = false
     latestStatus.state = 'connecting'
   })
 
+  state.__relayMqtt.clientConfigKey = configKey
   state.__relayMqtt.client = client
   return client
 }
@@ -133,7 +165,7 @@ export async function refreshBrokerStatus(timeoutMs = 3_500) {
 
   if (!client.connected) return latestStatus
 
-  const config = state.__relayMqtt?.config ?? defaultConfig
+  const config = currentConfig()
   await new Promise<void>((resolve) => {
     let settled = false
     let timeout: ReturnType<typeof setTimeout>
@@ -158,12 +190,12 @@ export async function refreshBrokerStatus(timeoutMs = 3_500) {
 }
 
 export function getBrokerConfig() {
-  const config = state.__relayMqtt?.config ?? defaultConfig
+  const config = currentConfig()
   return { ...config, password: '' }
 }
 
 export function getCommandTopic() {
-  return (state.__relayMqtt?.config ?? defaultConfig).commandTopic
+  return currentConfig().commandTopic
 }
 
 export function configureBroker(config: BrokerConfig) {
@@ -171,6 +203,7 @@ export function configureBroker(config: BrokerConfig) {
   const oldClient = state.__relayMqtt?.client
   if (oldClient) oldClient.end(true)
   state.__relayMqtt.client = undefined
+  state.__relayMqtt.clientConfigKey = undefined
   state.__relayMqtt.config = {
     ...defaultConfig,
     ...config,

@@ -132,7 +132,7 @@ export default function Page() {
         setConnected(status.online === true)
         setConnectionIssue(status.brokerConnected === true
           ? status.online === true ? '' : 'Broker reachable, but no fresh ESP32 heartbeat. Check device Wi-Fi, MQTT topics, and secrets.h.'
-          : 'MQTT broker unavailable. Configure MQTT_USER and MQTT_PASSWORD in project variables.')
+          : typeof status.brokerError === 'string' ? status.brokerError : 'The MQTT broker is unavailable. Check the broker endpoint and server connection.')
         if (status.online === true) setLastDeviceSeen(new Date(status.updatedAt || Date.now()))
         if (typeof status.autoRepeat === 'boolean' && !deviceSettingsLoadedRef.current) {
           setAutoRepeatEnabled(status.autoRepeat)
