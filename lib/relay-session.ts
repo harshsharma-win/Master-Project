@@ -5,7 +5,22 @@ const COOKIE_NAME = 'relay_session'
 const runtimeState = globalThis as typeof globalThis & { __relaySessionSecret?: Buffer }
 
 function secret() {
-  if (process.env.RELAY_ADMIN_SECRET) return process.env.RELAY_ADMIN_SECRET
+  const configuredSecret = process.env.RELAY_ADMIN_SECRET
+  if (configuredSecret) {
+    if (configuredSecret.length < 32) {
+      throw new Error('RELAY_ADMIN_SECRET must be at least 32 characters.')
+    }
+    return configuredSecret
+  }
+
+  if (process.env.NODE_ENV === 'production' && process.env.MQTT_PASSWORD) {
+    return createHmac('sha256', process.env.MQTT_PASSWORD).update('relay-session-signing-key:v1').digest('hex')
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('A stable server-side session secret or MQTT_PASSWORD must be configured for production sessions.')
+  }
+
   if (!runtimeState.__relaySessionSecret) runtimeState.__relaySessionSecret = randomBytes(32)
   return runtimeState.__relaySessionSecret.toString('hex')
 }
