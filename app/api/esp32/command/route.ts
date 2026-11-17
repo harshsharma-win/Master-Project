@@ -10,10 +10,11 @@ type CommandBody = {
   pulseGap?: number
   device?: string
   enabled?: boolean
+  eventId?: string
 }
 
 function isValidSignal(signal: string) {
-  return ['OPTION_1', 'OPTION_2', 'OPTION_3', 'OPTION_4', 'QUICK_MOTOR_2', 'REPEAT_QUESTION', 'REPEAT_OPTION', 'CUSTOM_PATTERN', 'SET_AUTO_REPEAT', 'STOP'].includes(signal)
+  return ['OPTION_1', 'OPTION_2', 'OPTION_3', 'OPTION_4', 'QUICK_MOTOR_2', 'REPEAT_QUESTION', 'REPEAT_OPTION', 'REPEAT_ANSWER', 'CUSTOM_PATTERN', 'SET_AUTO_REPEAT', 'STOP'].includes(signal)
 }
 
 export async function POST(request: Request) {
@@ -52,6 +53,8 @@ export async function POST(request: Request) {
   }
 
   if (!isValidSignal(signal) || (signal === 'SET_AUTO_REPEAT' && typeof body.enabled !== 'boolean') ||
+      (body.eventId !== undefined && (typeof body.eventId !== 'string' || body.eventId.length > 128 || !/^[A-Za-z0-9_-]+$/.test(body.eventId))) ||
+      (signal === 'REPEAT_ANSWER' && !body.eventId) ||
       !Number.isInteger(motor) || ![1, 2].includes(motor) ||
       !Number.isInteger(vibrations) || vibrations < 1 || vibrations > 20 ||
       !Number.isInteger(pulseDuration) || pulseDuration < 50 || pulseDuration > 5_000 ||
@@ -71,7 +74,7 @@ export async function POST(request: Request) {
       })
     }
 
-    const payload = JSON.stringify({ signal, motor, vibrations, pulseDuration, pulseGap, ...(signal === 'SET_AUTO_REPEAT' ? { enabled: body.enabled } : {}), device: body.device ?? 'ESP32-RELAY-01', timestamp: new Date().toISOString() })
+    const payload = JSON.stringify({ signal, motor, vibrations, pulseDuration, pulseGap, ...(signal === 'SET_AUTO_REPEAT' ? { enabled: body.enabled } : {}), ...(signal === 'REPEAT_ANSWER' ? { eventId: body.eventId } : {}), device: body.device ?? 'ESP32-RELAY-01', timestamp: new Date().toISOString() })
     const commandTopic = getCommandTopic()
     await new Promise<void>((resolve, reject) => client.publish(commandTopic, payload, { qos: 1 }, (error) => error ? reject(error) : resolve()))
 
