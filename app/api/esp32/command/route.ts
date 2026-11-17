@@ -54,7 +54,6 @@ export async function POST(request: Request) {
 
   if (!isValidSignal(signal) || (signal === 'SET_AUTO_REPEAT' && typeof body.enabled !== 'boolean') ||
       (body.eventId !== undefined && (typeof body.eventId !== 'string' || body.eventId.length > 128 || !/^[A-Za-z0-9_-]+$/.test(body.eventId))) ||
-      (signal === 'REPEAT_ANSWER' && !body.eventId) ||
       !Number.isInteger(motor) || ![1, 2].includes(motor) ||
       !Number.isInteger(vibrations) || vibrations < 1 || vibrations > 20 ||
       !Number.isInteger(pulseDuration) || pulseDuration < 50 || pulseDuration > 5_000 ||
