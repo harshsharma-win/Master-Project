@@ -38,6 +38,7 @@ export const latestStatus: {
 export const latestAck: {
   signal: string
   status: string
+  eventId?: string
   updatedAt: string
 } = {
   signal: '',
@@ -122,6 +123,7 @@ export function getBrokerClient() {
         const data = JSON.parse(payload.toString())
         latestAck.signal = data.signal ?? ''
         latestAck.status = data.status ?? ''
+        latestAck.eventId = typeof data.eventId === 'string' ? data.eventId : undefined
         latestAck.updatedAt = new Date().toISOString()
       } catch {
         // Ignore malformed acknowledgement payloads.

@@ -39,7 +39,8 @@ constexpr uint32_t HEARTBEAT_MS = 15'000;
 constexpr uint32_t WIFI_RETRY_MS = 10'000;
 constexpr uint32_t MQTT_RETRY_MS = 5'000;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 50;
-constexpr uint32_t AUTO_REPEAT_DELAY_MS = 2'000;
+constexpr uint32_t BUTTON_REQUEST_RETRY_MS = 750;
+constexpr uint32_t AUTO_REPEAT_PAUSE_MS = 2'000;
 
 WiFiClientSecure secureClient;
 PubSubClient mqttClient(secureClient);
@@ -49,6 +50,8 @@ uint8_t activeMotorPin = MOTOR_1_PIN;
 uint8_t remainingPulses = 0;
 uint8_t lastAnswerPulses = 0;
 uint8_t lastAnswerMotor = 1;
+uint32_t lastAnswerDurationMs = DEFAULT_PULSE_MS;
+uint32_t lastAnswerGapMs = DEFAULT_GAP_MS;
 uint32_t pulseDurationMs = DEFAULT_PULSE_MS;
 uint32_t pulseGapMs = DEFAULT_GAP_MS;
 uint32_t phaseStartedAt = 0;
@@ -56,30 +59,38 @@ uint32_t lastWiFiAttemptAt = 0;
 uint32_t lastMqttAttemptAt = 0;
 uint32_t lastHeartbeatAt = 0;
 uint32_t lastButtonChangeAt = 0;
+uint32_t lastButtonRequestSentAt = 0;
+uint32_t buttonRequestSequence = 0;
 uint32_t autoRepeatAt = 0;
+uint64_t queuedButtonRequests = 0;
 
 bool patternRunning = false;
 bool pulseOn = false;
 bool autoRepeatEnabled = false;
+bool autoRepeatSequenceActive = false;
 bool autoRepeatPending = false;
 bool stableButtonState = HIGH;
 bool lastButtonReading = HIGH;
 char lastAnswerLetter = '\0';
+String pendingButtonRequestId;
 String currentSignal;
+String currentEventId;
 
-void sendAck(const char* signal, const char* status) {
-  if (!mqttClient.connected()) return;
+bool sendAck(const char* signal, const char* status, const String& eventId = "") {
+  if (!mqttClient.connected()) return false;
 
-  StaticJsonDocument<256> document;
+  StaticJsonDocument<320> document;
   document["device"] = DEVICE_ID;
   document["signal"] = signal;
   document["status"] = status;
   document["timestamp"] = millis();
+  if (eventId.length() > 0) document["eventId"] = eventId;
 
-  char payload[256];
+  char payload[320];
   serializeJson(document, payload, sizeof(payload));
-  mqttClient.publish(ACK_TOPIC, payload, true);
-  Serial.printf("ACK %s: %s\n", signal, status);
+  const bool published = mqttClient.publish(ACK_TOPIC, payload, true);
+  Serial.printf("ACK %s: %s %s\n", signal, status, eventId.c_str());
+  return published;
 }
 
 void publishStatus(const char* state) {
@@ -114,9 +125,11 @@ void stopMotors() {
   patternRunning = false;
   pulseOn = false;
   remainingPulses = 0;
+  currentSignal = "";
+  currentEventId = "";
 }
 
-void startPattern(uint8_t motor, uint8_t pulses, uint32_t duration, uint32_t gap, const String& signal) {
+void startPattern(uint8_t motor, uint8_t pulses, uint32_t duration, uint32_t gap, const String& signal, const String& eventId = "") {
   if (motor != 1 && motor != 2) {
     sendAck(signal.c_str(), "INVALID_MOTOR");
     return;
@@ -128,29 +141,47 @@ void startPattern(uint8_t motor, uint8_t pulses, uint32_t duration, uint32_t gap
   pulseDurationMs = constrain(duration, 50UL, 5'000UL);
   pulseGapMs = constrain(gap, 50UL, 5'000UL);
   currentSignal = signal;
+  currentEventId = eventId;
   patternRunning = true;
   pulseOn = true;
   phaseStartedAt = millis();
   ledcWrite(activeMotorPin, MOTOR_POWER);
-  sendAck(signal.c_str(), "RECEIVED");
+  sendAck(signal.c_str(), "RECEIVED", eventId);
 }
 
-void rememberAnswer(uint8_t optionNumber, uint8_t motor, uint8_t pulses) {
+void rememberAnswer(uint8_t optionNumber, uint8_t motor, uint8_t pulses, uint32_t duration, uint32_t gap) {
   lastAnswerLetter = static_cast<char>('A' + optionNumber - 1);
   lastAnswerPulses = constrain(pulses, 1, 4);
   lastAnswerMotor = motor == 2 ? 2 : 1;
+  lastAnswerDurationMs = constrain(duration, 50UL, 5'000UL);
+  lastAnswerGapMs = constrain(gap, 50UL, 5'000UL);
   preferences.putChar("answer", lastAnswerLetter);
   preferences.putUChar("answerPulses", lastAnswerPulses);
   preferences.putUChar("answerMotor", lastAnswerMotor);
+  preferences.putUInt("answerDuration", lastAnswerDurationMs);
+  preferences.putUInt("answerGap", lastAnswerGapMs);
 }
 
-void repeatLastAnswer(const char* signal) {
+String createButtonRequestId() {
+  ++buttonRequestSequence;
+  return String(DEVICE_ID) + "-" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX) + "-" +
+    String(millis(), HEX) + "-" + String(buttonRequestSequence, HEX);
+}
+
+void startNextButtonRequest() {
+  if (!autoRepeatEnabled || pendingButtonRequestId.length() > 0 || queuedButtonRequests == 0) return;
+  --queuedButtonRequests;
+  pendingButtonRequestId = createButtonRequestId();
+  lastButtonRequestSentAt = 0;
+}
+
+void repeatLastAnswer(const char* signal, const String& eventId = "") {
   if (lastAnswerLetter < 'A' || lastAnswerLetter > 'D' || lastAnswerPulses == 0) {
-    sendAck(signal, "NO_PREVIOUS_ANSWER");
+    sendAck(signal, "NO_PREVIOUS_ANSWER", eventId);
     return;
   }
 
-  startPattern(lastAnswerMotor, lastAnswerPulses, DEFAULT_PULSE_MS, DEFAULT_GAP_MS, signal);
+  startPattern(lastAnswerMotor, lastAnswerPulses, lastAnswerDurationMs, lastAnswerGapMs, signal, eventId);
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -167,6 +198,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   const char* signal = document["signal"] | "";
+  const String eventId = document["eventId"] | "";
   if (!signal[0]) {
     sendAck("UNKNOWN", "MISSING_SIGNAL");
     return;
@@ -178,6 +210,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   const uint32_t gap = document["pulseGap"] | DEFAULT_GAP_MS;
 
   if (strcmp(signal, "STOP") == 0) {
+    pendingButtonRequestId = "";
+    queuedButtonRequests = 0;
+    lastButtonRequestSentAt = 0;
+    autoRepeatSequenceActive = false;
+    autoRepeatPending = false;
     stopMotors();
     sendAck(signal, "STOPPED");
     return;
@@ -186,8 +223,36 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(signal, "SET_AUTO_REPEAT") == 0) {
     autoRepeatEnabled = document["enabled"] | false;
     preferences.putBool("autoRepeat", autoRepeatEnabled);
+    if (!autoRepeatEnabled) {
+      pendingButtonRequestId = "";
+      queuedButtonRequests = 0;
+      lastButtonRequestSentAt = 0;
+      autoRepeatSequenceActive = false;
+      autoRepeatPending = false;
+      if (currentSignal == "REPEAT_ANSWER" || currentSignal == "AUTO_REPEAT") {
+        const String canceledEventId = currentEventId;
+        stopMotors();
+        sendAck("REPEAT_ANSWER", "CANCELLED", canceledEventId);
+      }
+    } else {
+      startNextButtonRequest();
+    }
     publishStatus("online");
     sendAck(signal, autoRepeatEnabled ? "ENABLED" : "DISABLED");
+    return;
+  }
+
+  if (strcmp(signal, "REPEAT_ANSWER") == 0 && eventId.length() > 0) {
+    if (!autoRepeatEnabled) {
+      sendAck(signal, "DISABLED", eventId);
+    } else if (eventId != pendingButtonRequestId) {
+      sendAck(signal, "STALE_REQUEST", eventId);
+    } else {
+      pendingButtonRequestId = "";
+      lastButtonRequestSentAt = 0;
+      autoRepeatSequenceActive = true;
+      repeatLastAnswer(signal, eventId);
+    }
     return;
   }
 
@@ -195,7 +260,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       strcmp(signal, "OPTION_3") == 0 || strcmp(signal, "OPTION_4") == 0) {
     const uint8_t optionNumber = static_cast<uint8_t>(signal[strlen(signal) - 1] - '0');
     const uint8_t pulses = constrain(requestedPulses, 1, 4);
-    rememberAnswer(optionNumber, motor, pulses);
+    pendingButtonRequestId = "";
+    queuedButtonRequests = 0;
+    lastButtonRequestSentAt = 0;
+    autoRepeatSequenceActive = false;
+    autoRepeatPending = false;
+    rememberAnswer(optionNumber, motor, pulses, duration, gap);
     startPattern(motor, pulses, duration, gap, signal);
     publishStatus("online");
     return;
@@ -231,8 +301,18 @@ void updateMotors() {
     ledcWrite(activeMotorPin, 0);
     pulseOn = false;
     if (--remainingPulses == 0) {
+      const bool scheduleAutoRepeat = autoRepeatEnabled && autoRepeatSequenceActive &&
+        (currentSignal == "REPEAT_ANSWER" || currentSignal == "AUTO_REPEAT");
       patternRunning = false;
-      sendAck(currentSignal.c_str(), "EXECUTED");
+      sendAck(currentSignal.c_str(), "EXECUTED", currentEventId);
+      currentEventId = "";
+      currentSignal = "";
+      if (scheduleAutoRepeat) {
+        autoRepeatAt = millis() + AUTO_REPEAT_PAUSE_MS;
+        autoRepeatPending = true;
+      } else {
+        startNextButtonRequest();
+      }
       return;
     }
     phaseStartedAt = millis();
@@ -248,8 +328,17 @@ void updateAutoRepeat() {
   if (!autoRepeatPending || static_cast<int32_t>(millis() - autoRepeatAt) < 0) return;
 
   autoRepeatPending = false;
-  if (!autoRepeatEnabled) return;
+  if (!autoRepeatEnabled || !autoRepeatSequenceActive) return;
   repeatLastAnswer("AUTO_REPEAT");
+}
+
+void updatePendingButtonRequest() {
+  if (!autoRepeatEnabled || pendingButtonRequestId.length() == 0 || !mqttClient.connected()) return;
+
+  const uint32_t now = millis();
+  if (lastButtonRequestSentAt != 0 && now - lastButtonRequestSentAt < BUTTON_REQUEST_RETRY_MS) return;
+  sendAck("REPEAT_ANSWER_REQUEST", "BUTTON_PRESSED", pendingButtonRequestId);
+  lastButtonRequestSentAt = now;
 }
 
 void updateButton() {
@@ -263,12 +352,19 @@ void updateButton() {
       sendAck("DEVICE_BUTTON", "PRESSED");
       if (!autoRepeatEnabled) {
         sendAck("AUTO_REPEAT", "DISABLED");
-      } else if (lastAnswerLetter < 'A' || lastAnswerLetter > 'D') {
+      } else if (lastAnswerLetter < 'A' || lastAnswerLetter > 'D' || lastAnswerPulses == 0) {
         sendAck("AUTO_REPEAT", "NO_PREVIOUS_ANSWER");
+      } else if (autoRepeatSequenceActive) {
+        sendAck("AUTO_REPEAT", "ALREADY_RUNNING");
       } else {
-        autoRepeatAt = now + AUTO_REPEAT_DELAY_MS;
-        autoRepeatPending = true;
-        sendAck("AUTO_REPEAT", "SCHEDULED_2S");
+        autoRepeatSequenceActive = true;
+        if (pendingButtonRequestId.length() > 0 || patternRunning) {
+          ++queuedButtonRequests;
+          sendAck("AUTO_REPEAT", "QUEUED");
+        } else {
+          pendingButtonRequestId = createButtonRequestId();
+          lastButtonRequestSentAt = 0;
+        }
       }
     }
   }
@@ -317,6 +413,8 @@ void setup() {
   lastAnswerLetter = preferences.getChar("answer", '\0');
   lastAnswerPulses = preferences.getUChar("answerPulses", 0);
   lastAnswerMotor = preferences.getUChar("answerMotor", 1);
+  lastAnswerDurationMs = preferences.getUInt("answerDuration", DEFAULT_PULSE_MS);
+  lastAnswerGapMs = preferences.getUInt("answerGap", DEFAULT_GAP_MS);
 
   const bool motor1Ready = ledcAttach(MOTOR_1_PIN, PWM_FREQUENCY, PWM_RESOLUTION);
   const bool motor2Ready = ledcAttach(MOTOR_2_PIN, PWM_FREQUENCY, PWM_RESOLUTION);
@@ -346,8 +444,9 @@ void loop() {
   }
 
   updateButton();
-  updateAutoRepeat();
+  updatePendingButtonRequest();
   updateMotors();
+  updateAutoRepeat();
 
   if (mqttClient.connected() && static_cast<uint32_t>(millis() - lastHeartbeatAt) >= HEARTBEAT_MS) {
     lastHeartbeatAt = millis();
